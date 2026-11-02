@@ -1,0 +1,521 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Evaluación de Calidad — Service Desk</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:system-ui,-apple-system,sans-serif;background:#EDEBE5;min-height:100vh}
+.wrap{max-width:720px;margin:0 auto;padding:0 16px}
+nav{background:#0F2044;padding:0 16px;position:sticky;top:0;z-index:100}
+.nav-inner{max-width:720px;margin:0 auto;display:flex;justify-content:space-between;align-items:center}
+.nav-brand{color:rgba(255,255,255,.4);font-size:11px;letter-spacing:.5px}
+.nav-tabs{display:flex}
+.nav-tab{padding:10px 14px;background:transparent;border:none;color:rgba(255,255,255,.45);cursor:pointer;font-size:13px;font-family:inherit;display:flex;align-items:center;gap:6px}
+.nav-tab.active{background:rgba(255,255,255,.1);color:#fff}
+.badge{background:#1D9E75;color:#fff;font-size:10px;font-weight:700;padding:1px 6px;border-radius:10px}
+table{width:100%;border-collapse:collapse}
+th{padding:9px 14px;font-size:10px;font-weight:600;color:#5F5E5A;text-align:left;text-transform:uppercase;letter-spacing:.5px;border-bottom:0.5px solid #D3D1C7;background:#F1EFE8}
+td{padding:10px 14px;border-bottom:0.5px solid #ECEAE4;font-size:13px}
+tr:hover td{background:#FAFAF8}
+.btn-sm{padding:4px 11px;border-radius:6px;border:0.5px solid #D3D1C7;background:#F1EFE8;cursor:pointer;font-size:11px;font-family:inherit;font-weight:500;color:#2C2C2A}
+.btn-del{padding:4px 8px;border-radius:6px;border:0.5px solid #FECACA;background:#FEF2F2;cursor:pointer;font-size:11px;font-family:inherit;color:#991B1B}
+#toast{position:fixed;top:16px;right:16px;z-index:9999;transform:translateY(-80px);transition:transform .3s}
+#toast.show{transform:translateY(0)}
+.toast-inner{padding:12px 18px;border-radius:10px;color:#fff;font-size:13px;font-weight:500;box-shadow:0 4px 20px rgba(0,0,0,.2);display:flex;align-items:center;gap:10px}
+</style>
+</head>
+<body>
+
+<div id="toast"><div class="toast-inner" id="toast-inner"></div></div>
+
+<nav>
+  <div class="nav-inner">
+    <span class="nav-brand">Calidad de Llamadas · Service Desk</span>
+    <div class="nav-tabs">
+      <button class="nav-tab active" id="tab-form" onclick="navTo('form')">Formulario</button>
+      <button class="nav-tab" id="tab-database" onclick="navTo('database')">Base de Datos <span class="badge" id="db-badge" style="display:none">0</span></button>
+    </div>
+  </div>
+</nav>
+
+<div id="app"></div>
+
+<script>
+// ── DATOS ─────────────────────────────────────────────────────────────────────
+const SECTIONS=[
+  {id:'apertura',title:'Apertura de la llamada',weight:15,color:'#7F77DD',
+   criteria:['Utiliza saludo institucional','Se identifica correctamente','Menciona el área de Service Desk','Mantiene tono profesional desde el inicio']},
+  {id:'validacion',title:'Validación y entendimiento',weight:20,color:'#378ADD',
+   criteria:['Valida identidad del usuario','Verifica datos requeridos','Escucha sin interrumpir','Realiza preguntas adecuadas','Comprende correctamente la necesidad',]},
+  {id:'gestion',title:'Gestión de la atención',weight:25,color:'#1D9E75',
+   criteria:['Mantiene control de la llamada','Explica claramente las acciones realizadas','Evita lenguaje técnico innecesario','Proporciona información correcta','Gestiona adecuadamente los tiempos de espera','Demuestra conocimiento del proceso']},
+  {id:'ticket',title:'Registro y gestión del ticket',weight:20,color:'#639922',
+   criteria:['Genera el ticket durante la llamada','Proporciona número de reporte','Clasifica correctamente el reporte','Asigna prioridad adecuada','Documenta información relevante','Informa siguiente paso o grupo resolutor']},
+  {id:'comunicacion',title:'Comunicación y servicio',weight:10,color:'#BA7517',
+   criteria:['Amabilidad y cortesía','Empatía con el usuario','Lenguaje profesional','Utiliza frases de cortesía (por favor, gracias)']},
+  {id:'cierre',title:'Cierre de la llamada',weight:10,color:'#D85A30',
+   criteria:['Pregunta si existe alguna otra consulta','Despedida profesional']},
+];
+const WAIT=[{v:'lt2',l:'< 2 min',s:100},{v:'2to5',l:'2–5 min',s:90},{v:'5to10',l:'5–10 min',s:70},{v:'gt10',l:'> 10 min',s:0}];
+
+// ── ESTADO ────────────────────────────────────────────────────────────────────
+let general={fecha:'',agente:'',evaluador:'',reporte:'',duracion:'',tipo:'',resultado:''};
+let answers={},obs={},waitTime=null,evals=[],currentView='form',detailEval=null,searchQ='',sortBy='date_desc';
+
+// ── HELPERS ───────────────────────────────────────────────────────────────────
+const SC=v=>v==null?'#888780':v>=90?'#1D9E75':v>=75?'#378ADD':v>=60?'#BA7517':'#D85A30';
+const ST=v=>v==null?'Sin calificar':v>=90?'Excelente':v>=75?'Bueno':v>=60?'Regular':'Deficiente';
+const TB=v=>v==null?'background:#F1EFE8;color:#888780':v>=90?'background:#EAF3DE;color:#27500A':v>=75?'background:#E6F1FB;color:#0C447C':v>=60?'background:#FAEEDA;color:#633806':'background:#FCEBEB;color:#791F1F';
+function calcSec(sid,crit,ans){let si=0,tot=0;crit.forEach((_,i)=>{const v=ans[`${sid}-${i}`];if(!v||v==='na')return;tot++;if(v==='si')si++;});return tot>0?(si/tot)*100:null;}
+function calcTotal(ans){let ws=0,wt=0;SECTIONS.forEach(s=>{const v=calcSec(s.id,s.criteria,ans);if(v!=null){ws+=(v/100)*s.weight;wt+=s.weight;}});return wt>0?(ws/wt)*100:null;}
+function fmtDate(d){try{return new Date(d+'T12:00:00').toLocaleDateString('es-MX',{day:'2-digit',month:'short',year:'numeric'});}catch{return d||'—';}}
+function fmtDateLong(d){try{return new Date(d+'T12:00:00').toLocaleDateString('es-MX',{day:'2-digit',month:'long',year:'numeric'});}catch{return d||'—';}}
+
+function showToast(msg,type){
+  const i=document.getElementById('toast-inner');
+  i.style.background=type==='success'?'#0A6E3F':'#991B1B';
+  i.innerHTML=`${type==='success'?'✓':'!'} ${msg} <button onclick="document.getElementById('toast').classList.remove('show')" style="background:none;border:none;color:rgba(255,255,255,.7);cursor:pointer;font-size:18px;padding:0;margin-left:8px;line-height:1">×</button>`;
+  document.getElementById('toast').classList.add('show');
+  setTimeout(()=>document.getElementById('toast').classList.remove('show'),4200);
+}
+function updateBadge(){const b=document.getElementById('db-badge');if(b){b.textContent=evals.length;b.style.display=evals.length>0?'':'none';}}
+
+// ── ESTILOS TOGGLE ────────────────────────────────────────────────────────────
+const BASE='padding:3px 11px;border-radius:20px;font-size:12px;font-weight:500;cursor:pointer;font-family:inherit;transition:all .1s;border:1px solid;';
+function tS(v,a){if(!a)return BASE+'background:transparent;border-color:#C4C2B9;color:#5F5E5A;';if(v==='si')return BASE+'background:#EAF3DE;border-color:#3B6D11;color:#27500A;';if(v==='no')return BASE+'background:#FCEBEB;border-color:#A32D2D;color:#791F1F;';return BASE+'background:#F1EFE8;border-color:#888780;color:#5F5E5A;';}
+function rBg(i,v){return v==='si'?'#EAF3DE':v==='no'?'#FCEBEB':i%2===0?'#fff':'#FAFAF8';}
+const ISS='width:100%;height:31px;padding:0 8px;border-radius:8px;border:0.5px solid #C4C2B9;font-family:inherit;font-size:13px;background:#fff;color:#2C2C2A;outline:none;box-sizing:border-box;';
+
+// ── FORMULARIO ────────────────────────────────────────────────────────────────
+function buildForm(){
+  const total=calcTotal(answers),circ=Math.PI*69;
+  let done=0,all=0;
+  SECTIONS.forEach(s=>s.criteria.forEach((_,i)=>{all++;if(answers[`${s.id}-${i}`])done++;}));
+
+  const sects=SECTIONS.map((s,si)=>{
+    const score=calcSec(s.id,s.criteria,answers);
+    const rows=s.criteria.map((c,ci)=>{const val=answers[`${s.id}-${ci}`];return`<div id="row-${s.id}-${ci}" style="display:grid;grid-template-columns:1fr 132px;align-items:center;padding:7px 16px;gap:10px;border-bottom:0.5px solid #F1EFE8;background:${rBg(ci,val)};transition:background .15s"><span style="font-size:13px">${c}</span><div style="display:flex;gap:3px;justify-content:center"><button id="t-${s.id}-${ci}-si" onclick="setAns('${s.id}',${ci},'si')" style="${tS('si',val==='si')}">Sí</button><button id="t-${s.id}-${ci}-no" onclick="setAns('${s.id}',${ci},'no')" style="${tS('no',val==='no')}">No</button><button id="t-${s.id}-${ci}-na" onclick="setAns('${s.id}',${ci},'na')" style="${tS('na',val==='na')}">N/A</button></div></div>`;}).join('');
+    return`<div style="background:#fff;border-radius:12px;overflow:hidden;margin-bottom:10px;border:0.5px solid #D3D1C7"><div style="height:4px;background:${s.color}"></div><div style="padding:11px 16px;display:flex;align-items:center;justify-content:space-between;border-bottom:0.5px solid #D3D1C7"><span style="font-size:14px;font-weight:500">${si+1}. ${s.title}</span><div style="display:flex;align-items:center;gap:10px"><span style="font-size:11px;color:#5F5E5A;background:#F1EFE8;border:0.5px solid #D3D1C7;border-radius:20px;padding:2px 8px">${s.weight}%</span><span id="ss-${s.id}" style="font-size:22px;font-weight:500;color:${SC(score)};min-width:50px;text-align:right;transition:color .3s">${score!=null?Math.round(score)+'%':'—'}</span></div></div><div style="display:grid;grid-template-columns:1fr 132px;padding:5px 16px;background:#F8F8F6;border-bottom:0.5px solid #D3D1C7"><span style="font-size:10px;font-weight:600;color:#888780;text-transform:uppercase;letter-spacing:.5px">Criterio</span><span style="font-size:10px;font-weight:600;color:#888780;text-transform:uppercase;letter-spacing:.5px;text-align:center">Evaluación</span></div>${rows}<div style="padding:8px 16px;border-top:0.5px solid #F1EFE8"><button onclick="togObs('${s.id}')" style="background:none;border:none;cursor:pointer;color:#888780;font-size:12px;font-family:inherit;padding:0;display:flex;align-items:center;gap:4px"><span id="oi-${s.id}" style="display:inline-block;transition:transform .18s">▶</span> Observaciones${obs[s.id]?` <span style="color:${s.color}">●</span>`:''}:</button><div id="oa-${s.id}" style="display:none;margin-top:8px"><textarea oninput="obs['${s.id}']=this.value" placeholder="Notas del evaluador..." rows="2" style="width:100%;border-radius:8px;border:0.5px solid #D3D1C7;padding:7px 10px;font-size:13px;font-family:inherit;resize:vertical;box-sizing:border-box;outline:none">${obs[s.id]||''}</textarea></div></div></div>`;
+  }).join('');
+
+  const waits=WAIT.map(o=>{const a=waitTime===o.v;let bc='#C4C2B9',bg='transparent',fc='#2C2C2A';if(a){if(o.s>=90){bc='#3B6D11';bg='#EAF3DE';fc='#27500A';}else if(o.s>=50){bc='#854F0B';bg='#FAEEDA';fc='#633806';}else{bc='#A32D2D';bg='#FCEBEB';fc='#791F1F';}}return`<button onclick="setWait('${o.v}')" style="padding:9px 4px;border-radius:8px;border:1.5px solid ${bc};background:${bg};color:${fc};font-size:12px;font-family:inherit;cursor:pointer;text-align:center;line-height:1.5;font-weight:${a?600:400}">${o.l}<br><strong style="font-size:11px">${o.s>0?o.s+'%':'Obs.'}</strong></button>`;}).join('');
+
+  document.getElementById('app').innerHTML=`
+  <div class="wrap" style="padding-bottom:48px">
+    <div style="text-align:center;padding:24px 0 16px;border-bottom:0.5px solid #D3D1C7;margin-bottom:16px">
+      <div style="font-size:10px;text-transform:uppercase;letter-spacing:1px;color:#888780;margin-bottom:8px">Calificación ponderada</div>
+      <svg width="154" height="86" viewBox="0 0 154 86" style="display:block;margin:0 auto 6px">
+        <path d="M8 77 A69 69 0 0 1 146 77" fill="none" stroke="#E2E0DB" stroke-width="8" stroke-linecap="round"/>
+        <path id="garc" d="M8 77 A69 69 0 0 1 146 77" fill="none" stroke="${SC(total)}" stroke-width="8" stroke-linecap="round"
+          stroke-dasharray="${circ.toFixed(2)}" stroke-dashoffset="${(circ*(1-(total!=null?Math.min(total/100,1):0))).toFixed(2)}"
+          style="transition:stroke-dashoffset .45s ease,stroke .45s ease"/>
+      </svg>
+      <div id="gscore" style="margin-top:-40px;font-size:44px;font-weight:500;color:${SC(total)};line-height:1;transition:color .4s">${total!=null?Math.round(total)+'%':'—'}</div>
+      <div id="gtier" style="font-size:13px;color:${SC(total)};margin-top:4px">${ST(total)}</div>
+      <div style="display:flex;align-items:center;justify-content:center;gap:10px;margin-top:10px">
+        <span id="dtxt" style="font-size:11px;color:#888780">${done}/${all} criterios</span>
+        <div style="width:100px;height:3px;background:#D3D1C7;border-radius:2px;overflow:hidden">
+          <div id="pbar" style="height:100%;background:#1D9E75;border-radius:2px;transition:width .3s;width:${all?(done/all*100).toFixed(1):0}%"></div>
+        </div>
+      </div>
+    </div>
+
+    <div style="background:#fff;border-radius:12px;overflow:hidden;margin-bottom:10px;border:0.5px solid #D3D1C7">
+      <div style="padding:9px 14px;background:#F1EFE8;border-bottom:0.5px solid #D3D1C7;font-size:11px;font-weight:600;color:#5F5E5A;text-transform:uppercase;letter-spacing:.7px">Datos generales</div>
+      <div style="padding:14px;display:grid;grid-template-columns:repeat(3,1fr);gap:10px 14px">
+        <div><label style="font-size:11px;color:#5F5E5A;display:block;margin-bottom:3px">Fecha</label><input type="date" value="${general.fecha}" oninput="general.fecha=this.value" style="${ISS}"></div>
+        <div><label style="font-size:11px;color:#5F5E5A;display:block;margin-bottom:3px">Agente</label><input type="text" value="${general.agente}" oninput="general.agente=this.value" style="${ISS}"></div>
+        <div><label style="font-size:11px;color:#5F5E5A;display:block;margin-bottom:3px">Evaluador</label><input type="text" value="${general.evaluador}" oninput="general.evaluador=this.value" style="${ISS}"></div>
+        <div><label style="font-size:11px;color:#5F5E5A;display:block;margin-bottom:3px">N° Reporte</label><input type="text" value="${general.reporte}" oninput="general.reporte=this.value" style="${ISS}"></div>
+        <div><label style="font-size:11px;color:#5F5E5A;display:block;margin-bottom:3px">Duración</label><input type="text" value="${general.duracion}" oninput="general.duracion=this.value" placeholder="08:32 min" style="${ISS}"></div>
+        <div><label style="font-size:11px;color:#5F5E5A;display:block;margin-bottom:3px">Tipo</label>
+          <select onchange="general.tipo=this.value" style="${ISS}">
+            <option value="">Seleccionar...</option>
+            <option${general.tipo==='Incidente'?' selected':''}>Incidente</option>
+            <option${general.tipo==='Requerimiento'?' selected':''}>Requerimiento</option>
+          </select></div>
+        <div><label style="font-size:11px;color:#5F5E5A;display:block;margin-bottom:3px">Resultado</label>
+          <select onchange="general.resultado=this.value" style="${ISS}">
+            <option value="">Seleccionar...</option>
+            <option${general.resultado==='Resuelto'?' selected':''}>Resuelto</option>
+            <option${general.resultado==='Escalado'?' selected':''}>Escalado</option>
+            <option${general.resultado==='Seguimiento'?' selected':''}>Seguimiento</option>
+          </select></div>
+      </div>
+    </div>
+
+    ${sects}
+
+    <div style="background:#fff;border-radius:12px;padding:14px;margin-bottom:10px;border:0.5px solid #D3D1C7">
+      <div style="font-size:11px;font-weight:600;color:#5F5E5A;text-transform:uppercase;letter-spacing:.7px;margin-bottom:10px">Tiempo en espera</div>
+      <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:7px">${waits}</div>
+    </div>
+
+    <div style="background:#fff;border-radius:12px;padding:14px;margin-bottom:14px;border:0.5px solid #D3D1C7">
+      <label style="font-size:11px;font-weight:600;color:#5F5E5A;text-transform:uppercase;letter-spacing:.7px;display:block;margin-bottom:8px">Notas generales</label>
+      <textarea oninput="obs.general=this.value" placeholder="Fortalezas, áreas de mejora y retroalimentación..." rows="3"
+        style="width:100%;border-radius:8px;border:0.5px solid #D3D1C7;padding:8px 10px;font-size:13px;font-family:inherit;resize:vertical;box-sizing:border-box;outline:none">${obs.general||''}</textarea>
+    </div>
+
+    <div style="display:flex;gap:8px">
+      <button onclick="saveEval()" id="save-btn" style="flex:1;padding:13px;border-radius:10px;border:none;background:#0A6E3F;color:#fff;font-size:14px;font-weight:700;cursor:pointer;font-family:inherit;letter-spacing:.3px">💾 Guardar evaluación</button>
+      <button onclick="exportPDF()" style="padding:13px 16px;border-radius:10px;border:none;background:#1A4A7A;color:#fff;font-size:14px;font-weight:700;cursor:pointer;font-family:inherit">📄 PDF</button>
+      <button onclick="clearForm()" style="padding:13px 16px;border-radius:10px;border:0.5px solid #D3D1C7;background:#fff;color:#5F5E5A;font-size:13px;cursor:pointer;font-family:inherit">Limpiar</button>
+    </div>
+  </div>`;
+}
+
+// ── LÓGICA FORMULARIO ─────────────────────────────────────────────────────────
+function setAns(sid,idx,val){
+  const k=`${sid}-${idx}`;answers[k]=answers[k]===val?null:val;const cur=answers[k];
+  ['si','no','na'].forEach(v=>{const b=document.getElementById(`t-${sid}-${idx}-${v}`);if(b)b.style.cssText=tS(v,cur===v);});
+  const row=document.getElementById(`row-${sid}-${idx}`);if(row)row.style.background=rBg(idx,cur);
+  const s=SECTIONS.find(s=>s.id===sid);
+  if(s){const sc=calcSec(sid,s.criteria,answers);const el=document.getElementById(`ss-${sid}`);if(el){el.textContent=sc!=null?Math.round(sc)+'%':'—';el.style.color=SC(sc);}}
+  const total=calcTotal(answers);const circ=Math.PI*69;
+  const arc=document.getElementById('garc');if(arc){arc.style.strokeDashoffset=(circ*(1-(total!=null?Math.min(total/100,1):0))).toFixed(2);arc.style.stroke=SC(total);}
+  const gs=document.getElementById('gscore');if(gs){gs.textContent=total!=null?Math.round(total)+'%':'—';gs.style.color=SC(total);}
+  const gt=document.getElementById('gtier');if(gt){gt.textContent=ST(total);gt.style.color=SC(total);}
+  let done=0,all=0;SECTIONS.forEach(s=>s.criteria.forEach((_,i)=>{all++;if(answers[`${s.id}-${i}`])done++;}));
+  const dt=document.getElementById('dtxt');if(dt)dt.textContent=`${done}/${all} criterios`;
+  const pb=document.getElementById('pbar');if(pb)pb.style.width=`${all?(done/all*100).toFixed(1):0}%`;
+}
+function setWait(val){waitTime=waitTime===val?null:val;buildForm();}
+function togObs(sid){const a=document.getElementById(`oa-${sid}`),i=document.getElementById(`oi-${sid}`);if(!a)return;const open=a.style.display==='none';a.style.display=open?'block':'none';if(i)i.style.transform=open?'rotate(90deg)':'rotate(0)';}
+function clearForm(){if(!confirm('¿Limpiar el formulario? Los datos no guardados se perderán.'))return;general={fecha:'',agente:'',evaluador:'',reporte:'',duracion:'',tipo:'',resultado:''};answers={};obs={};waitTime=null;buildForm();}
+
+// ── EXPORTAR PDF ──────────────────────────────────────────────────────────────
+function exportPDF(){
+  const total=calcTotal(answers);
+  const fecha=fmtDateLong(general.fecha);
+  const waitLabel=WAIT.find(o=>o.v===waitTime)?.l||'—';
+
+  const secRows=SECTIONS.map(s=>{
+    const v=calcSec(s.id,s.criteria,answers);
+    const critRows=s.criteria.map((c,ci)=>{
+      const val=answers[`${s.id}-${ci}`];
+      const siBg=val==='si'?'#EAF3DE':'#fff',noBg=val==='no'?'#FCEBEB':'#fff',naBg=val==='na'?'#F1EFE8':'#fff';
+      const siC=val==='si'?'#27500A':'#ccc',noC=val==='no'?'#791F1F':'#ccc',naC=val==='na'?'#5F5E5A':'#ccc';
+      return`<tr><td style="padding:5px 10px;border-bottom:1px solid #f0f0f0;font-size:11.5px;color:#1a1a1a">${c}</td>
+        <td style="text-align:center;border-bottom:1px solid #f0f0f0;background:${siBg};width:40px"><span style="font-size:15px;color:${siC}">${val==='si'?'✓':'○'}</span></td>
+        <td style="text-align:center;border-bottom:1px solid #f0f0f0;background:${noBg};width:40px"><span style="font-size:15px;color:${noC}">${val==='no'?'✓':'○'}</span></td>
+        <td style="text-align:center;border-bottom:1px solid #f0f0f0;background:${naBg};width:40px"><span style="font-size:15px;color:${naC}">${val==='na'?'✓':'○'}</span></td>
+      </tr>`;
+    }).join('');
+    const contrib=v!=null?(v/100*s.weight).toFixed(1):null;
+    return{s,v,critRows,contrib};
+  });
+
+  const html=`<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8">
+<title>Evaluación — ${general.agente||'Sin nombre'} — ${general.fecha||''}</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:Arial,Helvetica,sans-serif;color:#1a1a1a;padding:0;background:#fff}
+  @page{margin:1.5cm;size:A4}
+  @media print{body{padding:0}.no-print{display:none!important}table{page-break-inside:auto}tr{page-break-inside:avoid}}
+  .sec{margin-bottom:14px;page-break-inside:avoid}
+  .no-print{text-align:center;padding:16px;background:#f5f5f5;margin-bottom:20px}
+  .print-btn{padding:10px 24px;background:#1A4A7A;color:#fff;border:none;border-radius:8px;font-size:14px;cursor:pointer;font-family:Arial}
+</style></head><body>
+<div class="no-print">
+  <button class="print-btn" onclick="window.print()">🖨 Guardar como PDF / Imprimir</button>
+</div>
+
+<div style="background:#0F2044;color:#fff;padding:14px 18px;margin-bottom:14px;display:flex;justify-content:space-between;align-items:center;border-radius:6px">
+  <div>
+    <div style="font-size:9px;color:rgba(255,255,255,.45);letter-spacing:1.5px;text-transform:uppercase">Evaluación de Calidad de Llamadas</div>
+    <div style="font-size:18px;font-weight:bold;margin-top:3px">Service Desk</div>
+    <div style="font-size:11px;color:rgba(255,255,255,.5);margin-top:3px">Generado el ${new Date().toLocaleDateString('es-MX',{day:'2-digit',month:'long',year:'numeric'})} a las ${new Date().toLocaleTimeString('es-MX',{hour:'2-digit',minute:'2-digit'})}</div>
+  </div>
+  <div style="text-align:center">
+    <div style="font-size:40px;font-weight:bold;color:${SC(total)};line-height:1">${total!=null?Math.round(total)+'%':'—'}</div>
+    <div style="font-size:12px;color:rgba(255,255,255,.5);margin-top:2px">${ST(total)}</div>
+  </div>
+</div>
+
+<table style="width:100%;border-collapse:collapse;margin-bottom:14px;border:1px solid #e0e0e0;border-radius:6px;overflow:hidden">
+  <tr style="background:#f1efe8"><td colspan="4" style="padding:7px 12px;font-weight:bold;font-size:11px;color:#444;text-transform:uppercase;letter-spacing:.5px">Datos Generales</td></tr>
+  <tr><td style="padding:6px 12px;font-size:11px;color:#666;background:#fafaf8;width:18%">Fecha</td><td style="padding:6px 12px;font-size:12px;width:32%">${fecha}</td><td style="padding:6px 12px;font-size:11px;color:#666;background:#fafaf8;width:18%">Agente</td><td style="padding:6px 12px;font-size:12px">${general.agente||'—'}</td></tr>
+  <tr><td style="padding:6px 12px;font-size:11px;color:#666;background:#fafaf8">Evaluador</td><td style="padding:6px 12px;font-size:12px">${general.evaluador||'—'}</td><td style="padding:6px 12px;font-size:11px;color:#666;background:#fafaf8">N° Reporte</td><td style="padding:6px 12px;font-size:12px">${general.reporte||'—'}</td></tr>
+  <tr><td style="padding:6px 12px;font-size:11px;color:#666;background:#fafaf8">Duración</td><td style="padding:6px 12px;font-size:12px">${general.duracion||'—'}</td><td style="padding:6px 12px;font-size:11px;color:#666;background:#fafaf8">Tipo</td><td style="padding:6px 12px;font-size:12px">${general.tipo||'—'}</td></tr>
+  <tr><td style="padding:6px 12px;font-size:11px;color:#666;background:#fafaf8">Resultado</td><td style="padding:6px 12px;font-size:12px">${general.resultado||'—'}</td><td style="padding:6px 12px;font-size:11px;color:#666;background:#fafaf8">Tiempo Espera</td><td style="padding:6px 12px;font-size:12px">${waitLabel}</td></tr>
+</table>
+
+${secRows.map(({s,v,critRows})=>`
+<div class="sec">
+  <div style="background:${s.color};color:#fff;padding:7px 12px;display:flex;justify-content:space-between;align-items:center;border-radius:5px 5px 0 0">
+    <strong style="font-size:12px">${s.title}</strong>
+    <span style="font-size:11px">Peso ${s.weight}% &nbsp;|&nbsp; Puntaje: <strong>${v!=null?Math.round(v)+'%':'—'}</strong></span>
+  </div>
+  <table style="width:100%;border-collapse:collapse;border:1px solid #e0e0e0;border-top:none">
+    <tr style="background:#f8f8f8">
+      <th style="padding:5px 10px;text-align:left;font-size:10px;color:#555;font-weight:600">Criterio</th>
+      <th style="width:40px;font-size:10px;color:#27500A;text-align:center">Sí</th>
+      <th style="width:40px;font-size:10px;color:#791F1F;text-align:center">No</th>
+      <th style="width:40px;font-size:10px;color:#5F5E5A;text-align:center">N/A</th>
+    </tr>
+    ${critRows}
+  </table>
+  ${obs[s.id]?`<div style="padding:5px 10px;background:#fafaf8;border:1px solid #e0e0e0;border-top:none;font-size:10.5px;color:#555"><strong>Obs:</strong> ${obs[s.id]}</div>`:''}
+</div>`).join('')}
+
+<table style="width:100%;border-collapse:collapse;border:1px solid #e0e0e0;margin-top:14px;page-break-inside:avoid">
+  <tr style="background:#0F2044;color:#fff">
+    <th style="padding:7px 12px;text-align:left;font-size:11px">Sección</th>
+    <th style="padding:7px 12px;text-align:center;font-size:11px;width:60px">Peso</th>
+    <th style="padding:7px 12px;text-align:center;font-size:11px;width:80px">Puntaje</th>
+    <th style="padding:7px 12px;text-align:center;font-size:11px;width:100px">Contribución</th>
+  </tr>
+  ${secRows.map(({s,v,contrib})=>`<tr><td style="padding:6px 12px;font-size:11.5px">${s.title}</td><td style="text-align:center;font-size:11.5px">${s.weight}%</td><td style="text-align:center;font-size:12px;font-weight:bold;color:${SC(v)}">${v!=null?Math.round(v)+'%':'—'}</td><td style="text-align:center;font-size:11.5px">${contrib!=null?contrib+'%':'—'}</td></tr>`).join('')}
+  <tr style="background:#0F2044;color:#fff">
+    <td colspan="2" style="padding:8px 12px;font-size:12px;font-weight:bold">CALIFICACIÓN TOTAL PONDERADA</td>
+    <td style="text-align:center;font-size:18px;font-weight:bold;color:${SC(total)}">${total!=null?Math.round(total)+'%':'—'}</td>
+    <td style="text-align:center;font-size:12px;font-weight:bold;color:${SC(total)}">${ST(total)}</td>
+  </tr>
+</table>
+
+${obs.general?`<div style="margin-top:12px;padding:10px 14px;border:1px solid #e0e0e0;border-radius:6px;page-break-inside:avoid"><strong style="font-size:10px;color:#666;text-transform:uppercase;letter-spacing:.5px">Notas Generales</strong><p style="margin-top:5px;font-size:12px;color:#333">${obs.general}</p></div>`:''}
+
+<script>window.onload=function(){window.print()}<\/script>
+</body></html>`;
+
+  const win=window.open('','_blank');
+  if(!win){alert('Permite las ventanas emergentes para generar el PDF.');return;}
+  win.document.write(html);win.document.close();
+}
+
+// ── BASE DE DATOS ─────────────────────────────────────────────────────────────
+function getStats(){
+  if(!evals.length)return null;
+  const sc=evals.filter(e=>e.totalScore!=null).map(e=>e.totalScore);
+  const avg=sc.length?sc.reduce((a,b)=>a+b,0)/sc.length:null;
+  return{total:evals.length,avg,
+    excelente:evals.filter(e=>(e.totalScore??0)>=90).length,
+    bueno:evals.filter(e=>(e.totalScore??0)>=75&&(e.totalScore??0)<90).length,
+    regular:evals.filter(e=>(e.totalScore??0)>=60&&(e.totalScore??0)<75).length,
+    deficiente:evals.filter(e=>e.totalScore!=null&&e.totalScore<60).length};
+}
+function getFiltered(){
+  let list=[...evals];
+  if(searchQ){const q=searchQ.toLowerCase();list=list.filter(e=>['agente','evaluador','reporte'].some(k=>(e.generalData?.[k]||'').toLowerCase().includes(q)));}
+  if(sortBy==='score_desc')list.sort((a,b)=>(b.totalScore??0)-(a.totalScore??0));
+  else if(sortBy==='score_asc')list.sort((a,b)=>(a.totalScore??0)-(b.totalScore??0));
+  else if(sortBy==='agent')list.sort((a,b)=>(a.generalData?.agente||'').localeCompare(b.generalData?.agente||''));
+  else list.sort((a,b)=>new Date(b.savedAt)-new Date(a.savedAt));
+  return list;
+}
+
+function buildDatabase(){
+  const stats=getStats();
+  let statsHTML='';
+  if(stats){
+    statsHTML=`<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:14px">${[['Total',stats.total,'#0F2044'],['Promedio',stats.avg!=null?Math.round(stats.avg)+'%':'—',SC(stats.avg)],['Excelente',stats.excelente,'#1D9E75'],['Deficiente',stats.deficiente,'#D85A30']].map(([l,v,c])=>`<div style="background:#fff;border-radius:10px;padding:12px 10px;border:0.5px solid #D3D1C7;text-align:center"><div style="font-size:11px;color:#888780;margin-bottom:4px">${l}</div><div style="font-size:26px;font-weight:500;color:${c}">${v}</div></div>`).join('')}</div>
+    <div style="background:#fff;border-radius:10px;padding:12px 16px;margin-bottom:12px;border:0.5px solid #D3D1C7"><div style="font-size:11px;font-weight:600;color:#5F5E5A;text-transform:uppercase;letter-spacing:.5px;margin-bottom:10px">Distribución</div>${[['Excelente ≥90%',stats.excelente,'#1D9E75'],['Bueno 75–89%',stats.bueno,'#378ADD'],['Regular 60–74%',stats.regular,'#BA7517'],['Deficiente <60%',stats.deficiente,'#D85A30']].map(([l,n,c])=>`<div style="display:flex;align-items:center;gap:10px;margin-bottom:6px"><span style="font-size:11px;color:#5F5E5A;min-width:130px">${l}</span><div style="flex:1;height:8px;background:#F1EFE8;border-radius:4px;overflow:hidden"><div style="height:100%;background:${c};border-radius:4px;width:${stats.total?(n/stats.total*100).toFixed(1):0}%"></div></div><span style="font-size:12px;font-weight:600;color:${c};min-width:24px;text-align:right">${n}</span></div>`).join('')}</div>`;
+  }
+
+  const filtered=getFiltered();
+  let tableHTML='';
+  if(!filtered.length){
+    tableHTML=evals.length===0
+      ?`<div style="background:#fff;border-radius:12px;padding:48px;text-align:center;border:0.5px solid #D3D1C7;color:#888780"><div style="font-size:44px;margin-bottom:12px">📋</div><div style="font-size:15px;font-weight:500;color:#2C2C2A;margin-bottom:8px">Sin evaluaciones guardadas</div><div style="font-size:13px">Completa el formulario y presiona <strong>"Guardar evaluación"</strong>.</div><button onclick="navTo('form')" style="margin-top:16px;padding:9px 20px;border-radius:8px;border:none;background:#0F2044;color:#fff;cursor:pointer;font-family:inherit;font-size:13px;font-weight:500">Ir al formulario →</button></div>`
+      :'<div style="background:#fff;border-radius:12px;padding:32px;text-align:center;border:0.5px solid #D3D1C7;color:#888780">Sin resultados para esa búsqueda</div>';
+  }else{
+    tableHTML=`<div style="background:#fff;border-radius:12px;overflow:hidden;border:0.5px solid #D3D1C7"><table><thead><tr>${['Fecha','Agente','Evaluador','Tipo','Resultado','Total','Nivel',''].map(h=>`<th>${h}</th>`).join('')}</tr></thead><tbody>${filtered.map(ev=>{const sc=ev.totalScore??null,ts=TB(sc),fecha=fmtDate(ev.generalData?.fecha);return`<tr><td style="font-size:12px;color:#888780;white-space:nowrap">${fecha}</td><td style="font-weight:500">${ev.generalData?.agente||'—'}</td><td style="font-size:12px;color:#5F5E5A">${ev.generalData?.evaluador||'—'}</td><td style="font-size:12px;color:#5F5E5A">${ev.generalData?.tipo||'—'}</td><td style="font-size:12px;color:#5F5E5A">${ev.generalData?.resultado||'—'}</td><td style="text-align:center;font-size:17px;font-weight:600;color:${SC(sc)}">${sc!=null?Math.round(sc)+'%':'—'}</td><td style="text-align:center"><span style="font-size:11px;font-weight:600;padding:3px 9px;border-radius:20px;${ts}">${ST(sc)}</span></td><td><div style="display:flex;gap:6px"><button onclick="showDetail('${ev.id}')" class="btn-sm">Ver</button><button onclick="delDetail2('${ev.id}')" class="btn-del">×</button></div></td></tr>`;}).join('')}</tbody></table></div>`;
+  }
+
+  document.getElementById('app').innerHTML=`
+  <div class="wrap" style="padding:16px 0 48px">
+    ${statsHTML}
+    <div style="display:flex;gap:8px;margin-bottom:12px">
+      <input style="flex:1;height:34px;padding:0 12px;border-radius:8px;border:0.5px solid #D3D1C7;font-family:inherit;font-size:13px;outline:none" placeholder="Buscar agente, evaluador o N° reporte…" value="${searchQ.replace(/"/g,'&quot;')}" oninput="searchQ=this.value;buildDatabase()">
+      <select style="height:34px;padding:0 10px;border-radius:8px;border:0.5px solid #D3D1C7;background:#fff;font-family:inherit;font-size:12px;outline:none" onchange="sortBy=this.value;buildDatabase()">
+        <option value="date_desc"${sortBy==='date_desc'?' selected':''}>Más recientes</option>
+        <option value="score_desc"${sortBy==='score_desc'?' selected':''}>Mayor puntaje</option>
+        <option value="score_asc"${sortBy==='score_asc'?' selected':''}>Menor puntaje</option>
+        <option value="agent"${sortBy==='agent'?' selected':''}>Por agente A–Z</option>
+      </select>
+      <button onclick="exportCSV()" style="height:34px;padding:0 14px;border-radius:8px;border:0.5px solid #D3D1C7;background:#fff;cursor:pointer;font-family:inherit;font-size:12px;color:#5F5E5A;font-weight:500">↓ CSV</button>
+    </div>
+    ${tableHTML}
+  </div>`;
+}
+
+// ── DETALLE ───────────────────────────────────────────────────────────────────
+function showDetail(id){
+  detailEval=evals.find(e=>e.id===id);if(!detailEval)return;
+  const ev=detailEval,sc=ev.totalScore??null,fecha=fmtDate(ev.generalData?.fecha);
+  const tags=[ev.generalData?.tipo,ev.generalData?.resultado,ev.generalData?.duracion].filter(Boolean).map(v=>`<span style="font-size:11px;background:rgba(255,255,255,.1);padding:2px 9px;border-radius:20px;color:rgba(255,255,255,.65)">${v}</span>`).join('');
+  const minis=SECTIONS.map(s=>{const v=ev.sectionScores?.[s.id]??null;return`<div style="background:#fff;border-radius:8px;padding:10px 12px;border:0.5px solid #D3D1C7"><div style="height:3px;background:${s.color};border-radius:2px;margin-bottom:8px"></div><div style="font-size:10px;color:#888780">${s.weight}%</div><div style="font-size:11px;color:#5F5E5A;margin:2px 0 4px;line-height:1.3">${s.title.replace(/^\d+\. /,'')}</div><div style="font-size:22px;font-weight:500;color:${SC(v)}">${v!=null?Math.round(v)+'%':'—'}</div></div>`;}).join('');
+  const secs=SECTIONS.map(s=>{const v=ev.sectionScores?.[s.id]??null;const rows=s.criteria.map((c,ci)=>{const val=ev.answers?.[`${s.id}-${ci}`];const bg=val==='si'?'#EAF3DE':val==='no'?'#FCEBEB':ci%2===0?'#fff':'#FAFAF8';const label=val==='si'?'✓ Sí':val==='no'?'✗ No':val==='na'?'— N/A':'—';const lc=val==='si'?'#27500A':val==='no'?'#791F1F':'#888780';return`<div style="display:flex;justify-content:space-between;align-items:center;padding:7px 14px;border-bottom:0.5px solid #F1EFE8;background:${bg}"><span style="font-size:12.5px">${c}</span><span style="font-size:12px;font-weight:600;color:${lc};white-space:nowrap;margin-left:12px">${label}</span></div>`;}).join('');const obsH=ev.observations?.[s.id]?`<div style="padding:8px 14px;background:#F8F8F6;border-top:0.5px solid #F1EFE8;font-size:12px;color:#5F5E5A"><strong>Obs:</strong> ${ev.observations[s.id]}</div>`:'';return`<div style="background:#fff;border-radius:10px;overflow:hidden;margin-bottom:10px;border:0.5px solid #D3D1C7"><div style="display:flex;justify-content:space-between;align-items:center;padding:10px 14px;border-bottom:0.5px solid #F1EFE8;background:#F8F8F6"><div style="display:flex;align-items:center;gap:8px"><div style="width:3px;height:16px;background:${s.color};border-radius:2px"></div><span style="font-size:13px;font-weight:500">${s.title}</span></div><span style="font-size:18px;font-weight:500;color:${SC(v)}">${v!=null?Math.round(v)+'%':'—'}</span></div>${rows}${obsH}</div>`;}).join('');
+  const notesH=ev.observations?.general?`<div style="background:#fff;border-radius:10px;padding:12px 16px;border:0.5px solid #D3D1C7;margin-bottom:10px"><div style="font-size:11px;font-weight:600;color:#5F5E5A;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px">Notas generales</div><div style="font-size:13px">${ev.observations.general}</div></div>`:'';
+
+  document.getElementById('app').innerHTML=`
+  <div class="wrap" style="padding:16px 0 48px">
+    <button onclick="backToDb()" style="background:none;border:none;cursor:pointer;color:#888780;font-family:inherit;font-size:13px;padding:0;display:flex;align-items:center;gap:4px;margin-bottom:14px">← Volver a la base de datos</button>
+    <div style="background:#0F2044;border-radius:12px;padding:20px 24px;margin-bottom:12px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px">
+      <div><div style="font-size:10px;color:rgba(255,255,255,.4);letter-spacing:1.5px;text-transform:uppercase;margin-bottom:6px">Evaluación registrada</div><div style="font-size:22px;font-weight:500;color:#fff">${ev.generalData?.agente||'Sin nombre'}</div><div style="font-size:12px;color:rgba(255,255,255,.5);margin-top:4px">${fecha} · Evaluador: ${ev.generalData?.evaluador||'—'} · Reporte: ${ev.generalData?.reporte||'—'}</div><div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap">${tags}</div></div>
+      <div style="text-align:center"><div style="font-size:46px;font-weight:500;color:${SC(sc)};line-height:1">${sc!=null?Math.round(sc)+'%':'—'}</div><div style="font-size:12px;color:rgba(255,255,255,.4);margin-top:4px">${ST(sc)}</div></div>
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:12px">${minis}</div>
+    ${secs}${notesH}
+    <div style="display:flex;gap:8px;margin-bottom:8px">
+      <button onclick="exportPDFFromEval(detailEval)" style="flex:1;padding:11px;border-radius:8px;border:none;background:#1A4A7A;color:#fff;cursor:pointer;font-family:inherit;font-size:13px;font-weight:700">📄 Generar PDF de esta evaluación</button>
+    </div>
+    <button onclick="if(confirm('¿Eliminar?'))delDetail('${ev.id}')" style="width:100%;padding:10px;border-radius:8px;border:0.5px solid #FECACA;background:#FEF2F2;color:#991B1B;cursor:pointer;font-family:inherit;font-size:13px;font-weight:500">Eliminar esta evaluación</button>
+  </div>`;
+}
+function backToDb(){detailEval=null;navTo('database');}
+
+// ── PDF DESDE REGISTRO GUARDADO ───────────────────────────────────────────────
+function exportPDFFromEval(ev){
+  if(!ev)return;
+  const total=ev.totalScore??null;
+  const fecha=fmtDateLong(ev.generalData?.fecha||'');
+  const waitLabel=WAIT.find(o=>o.v===ev.waitTime)?.l||ev.waitTime||'—';
+
+  const secRows=SECTIONS.map(s=>{
+    const v=ev.sectionScores?.[s.id]??null;
+    const critRows=s.criteria.map((c,ci)=>{
+      const val=ev.answers?.[`${s.id}-${ci}`];
+      const siBg=val==='si'?'#EAF3DE':'#fff',noBg=val==='no'?'#FCEBEB':'#fff',naBg=val==='na'?'#F1EFE8':'#fff';
+      const siC=val==='si'?'#27500A':'#ccc',noC=val==='no'?'#791F1F':'#ccc',naC=val==='na'?'#5F5E5A':'#ccc';
+      return`<tr><td style="padding:5px 10px;border-bottom:1px solid #f0f0f0;font-size:11.5px;color:#1a1a1a">${c}</td>
+        <td style="text-align:center;border-bottom:1px solid #f0f0f0;background:${siBg};width:40px"><span style="font-size:15px;color:${siC}">${val==='si'?'✓':'○'}</span></td>
+        <td style="text-align:center;border-bottom:1px solid #f0f0f0;background:${noBg};width:40px"><span style="font-size:15px;color:${noC}">${val==='no'?'✓':'○'}</span></td>
+        <td style="text-align:center;border-bottom:1px solid #f0f0f0;background:${naBg};width:40px"><span style="font-size:15px;color:${naC}">${val==='na'?'✓':'○'}</span></td>
+      </tr>`;
+    }).join('');
+    const contrib=v!=null?(v/100*s.weight).toFixed(1):null;
+    return{s,v,critRows,contrib};
+  });
+
+  const savedAt=ev.savedAt?new Date(ev.savedAt).toLocaleDateString('es-MX',{day:'2-digit',month:'long',year:'numeric'})+' a las '+new Date(ev.savedAt).toLocaleTimeString('es-MX',{hour:'2-digit',minute:'2-digit'}):'—';
+
+  const html=`<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8">
+<title>Evaluación — ${ev.generalData?.agente||'Sin nombre'} — ${ev.generalData?.fecha||''}</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:Arial,Helvetica,sans-serif;color:#1a1a1a;background:#fff}
+  @page{margin:1.5cm;size:A4}
+  @media print{.no-print{display:none!important}tr{page-break-inside:avoid}}
+  .sec{margin-bottom:14px;page-break-inside:avoid}
+  .no-print{text-align:center;padding:16px;background:#f5f5f5;margin-bottom:20px}
+  .print-btn{padding:10px 24px;background:#1A4A7A;color:#fff;border:none;border-radius:8px;font-size:14px;cursor:pointer;font-family:Arial}
+</style></head><body>
+<div class="no-print">
+  <button class="print-btn" onclick="window.print()">🖨 Guardar como PDF / Imprimir</button>
+</div>
+
+<div style="background:#0F2044;color:#fff;padding:14px 18px;margin-bottom:14px;display:flex;justify-content:space-between;align-items:center;border-radius:6px">
+  <div>
+    <div style="font-size:9px;color:rgba(255,255,255,.45);letter-spacing:1.5px;text-transform:uppercase">Evaluación de Calidad de Llamadas · Service Desk</div>
+    <div style="font-size:18px;font-weight:bold;margin-top:3px">${ev.generalData?.agente||'Sin nombre'}</div>
+    <div style="font-size:11px;color:rgba(255,255,255,.5);margin-top:3px">Registrado el ${savedAt}</div>
+  </div>
+  <div style="text-align:center">
+    <div style="font-size:40px;font-weight:bold;color:${SC(total)};line-height:1">${total!=null?Math.round(total)+'%':'—'}</div>
+    <div style="font-size:12px;color:rgba(255,255,255,.5);margin-top:2px">${ST(total)}</div>
+  </div>
+</div>
+
+<table style="width:100%;border-collapse:collapse;margin-bottom:14px;border:1px solid #e0e0e0;overflow:hidden">
+  <tr style="background:#f1efe8"><td colspan="4" style="padding:7px 12px;font-weight:bold;font-size:11px;color:#444;text-transform:uppercase;letter-spacing:.5px">Datos Generales</td></tr>
+  <tr><td style="padding:6px 12px;font-size:11px;color:#666;background:#fafaf8;width:18%">Fecha</td><td style="padding:6px 12px;font-size:12px;width:32%">${fecha}</td><td style="padding:6px 12px;font-size:11px;color:#666;background:#fafaf8;width:18%">Agente</td><td style="padding:6px 12px;font-size:12px">${ev.generalData?.agente||'—'}</td></tr>
+  <tr><td style="padding:6px 12px;font-size:11px;color:#666;background:#fafaf8">Evaluador</td><td style="padding:6px 12px;font-size:12px">${ev.generalData?.evaluador||'—'}</td><td style="padding:6px 12px;font-size:11px;color:#666;background:#fafaf8">N° Reporte</td><td style="padding:6px 12px;font-size:12px">${ev.generalData?.reporte||'—'}</td></tr>
+  <tr><td style="padding:6px 12px;font-size:11px;color:#666;background:#fafaf8">Duración</td><td style="padding:6px 12px;font-size:12px">${ev.generalData?.duracion||'—'}</td><td style="padding:6px 12px;font-size:11px;color:#666;background:#fafaf8">Tipo</td><td style="padding:6px 12px;font-size:12px">${ev.generalData?.tipo||'—'}</td></tr>
+  <tr><td style="padding:6px 12px;font-size:11px;color:#666;background:#fafaf8">Resultado</td><td style="padding:6px 12px;font-size:12px">${ev.generalData?.resultado||'—'}</td><td style="padding:6px 12px;font-size:11px;color:#666;background:#fafaf8">Tiempo Espera</td><td style="padding:6px 12px;font-size:12px">${waitLabel}</td></tr>
+</table>
+
+${secRows.map(({s,v,critRows})=>`
+<div class="sec">
+  <div style="background:${s.color};color:#fff;padding:7px 12px;display:flex;justify-content:space-between;align-items:center;border-radius:5px 5px 0 0">
+    <strong style="font-size:12px">${s.title}</strong>
+    <span style="font-size:11px">Peso ${s.weight}% &nbsp;|&nbsp; Puntaje: <strong>${v!=null?Math.round(v)+'%':'—'}</strong></span>
+  </div>
+  <table style="width:100%;border-collapse:collapse;border:1px solid #e0e0e0;border-top:none">
+    <tr style="background:#f8f8f8">
+      <th style="padding:5px 10px;text-align:left;font-size:10px;color:#555;font-weight:600">Criterio</th>
+      <th style="width:40px;font-size:10px;color:#27500A;text-align:center">Sí</th>
+      <th style="width:40px;font-size:10px;color:#791F1F;text-align:center">No</th>
+      <th style="width:40px;font-size:10px;color:#5F5E5A;text-align:center">N/A</th>
+    </tr>
+    ${critRows}
+  </table>
+  ${ev.observations?.[s.id]?`<div style="padding:5px 10px;background:#fafaf8;border:1px solid #e0e0e0;border-top:none;font-size:10.5px;color:#555"><strong>Obs:</strong> ${ev.observations[s.id]}</div>`:''}
+</div>`).join('')}
+
+<table style="width:100%;border-collapse:collapse;border:1px solid #e0e0e0;margin-top:14px;page-break-inside:avoid">
+  <tr style="background:#0F2044;color:#fff">
+    <th style="padding:7px 12px;text-align:left;font-size:11px">Sección</th>
+    <th style="padding:7px 12px;text-align:center;font-size:11px;width:60px">Peso</th>
+    <th style="padding:7px 12px;text-align:center;font-size:11px;width:80px">Puntaje</th>
+    <th style="padding:7px 12px;text-align:center;font-size:11px;width:100px">Contribución</th>
+  </tr>
+  ${secRows.map(({s,v,contrib})=>`<tr><td style="padding:6px 12px;font-size:11.5px">${s.title}</td><td style="text-align:center;font-size:11.5px">${s.weight}%</td><td style="text-align:center;font-size:12px;font-weight:bold;color:${SC(v)}">${v!=null?Math.round(v)+'%':'—'}</td><td style="text-align:center;font-size:11.5px">${contrib!=null?contrib+'%':'—'}</td></tr>`).join('')}
+  <tr style="background:#0F2044;color:#fff">
+    <td colspan="2" style="padding:8px 12px;font-size:12px;font-weight:bold">CALIFICACIÓN TOTAL PONDERADA</td>
+    <td style="text-align:center;font-size:18px;font-weight:bold;color:${SC(total)}">${total!=null?Math.round(total)+'%':'—'}</td>
+    <td style="text-align:center;font-size:12px;font-weight:bold;color:${SC(total)}">${ST(total)}</td>
+  </tr>
+</table>
+
+${ev.observations?.general?`<div style="margin-top:12px;padding:10px 14px;border:1px solid #e0e0e0;border-radius:6px;page-break-inside:avoid"><strong style="font-size:10px;color:#666;text-transform:uppercase;letter-spacing:.5px">Notas Generales</strong><p style="margin-top:5px;font-size:12px;color:#333">${ev.observations.general}</p></div>`:''}
+
+<script>window.onload=function(){window.print()}<\/script>
+</body></html>`;
+
+  const win=window.open('','_blank');
+  if(!win){alert('Permite las ventanas emergentes para generar el PDF.');return;}
+  win.document.write(html);win.document.close();
+}
+
+// ── localStorage (funciona en cualquier navegador) ────────────────────────────
+function loadEvals(){
+  try{
+    const keys=Object.keys(localStorage).filter(k=>k.startsWith('eval:'));
+    evals=keys.map(k=>{try{return JSON.parse(localStorage.getItem(k));}catch{return null;}}).filter(Boolean);
+    evals.sort((a,b)=>new Date(b.savedAt)-new Date(a.savedAt));
+    updateBadge();
+  }catch{evals=[];updateBadge();}
+}
+
+function saveEval(){
+  if(!general.agente.trim()){showToast('Ingresa al menos el nombre del agente','error');return;}
+  try{
+    const id=`eval:${Date.now()}`;
+    const secScores={};SECTIONS.forEach(s=>{secScores[s.id]=calcSec(s.id,s.criteria,answers);});
+    const total=calcTotal(answers);
+    const rec={id,savedAt:new Date().toISOString(),generalData:{...general},answers:{...answers},observations:{...obs},waitTime,sectionScores:secScores,totalScore:total};
+    localStorage.setItem(id,JSON.stringify(rec));
+    showToast(`Evaluación de ${general.agente} guardada correctamente`,'success');
+    loadEvals();
+  }catch(e){showToast('Error al guardar: '+e.message,'error');}
+}
+
+function delDetail2(id){if(!confirm('¿Eliminar esta evaluación permanentemente?'))return;localStorage.removeItem(id);loadEvals();buildDatabase();showToast('Evaluación eliminada','success');}
+function delDetail(id){localStorage.removeItem(id);loadEvals();navTo('database');showToast('Evaluación eliminada','success');}
+
+function exportCSV(){
+  const hdrs=['Fecha','Agente','Evaluador','N° Reporte','Duración','Tipo','Resultado','Tiempo Espera',...SECTIONS.map(s=>`${s.title.replace(/^\d+\. /,'')} ${s.weight}%`),'Total %','Calificación'];
+  const wl=v=>WAIT.find(o=>o.v===v)?.l||v||'';
+  const rows=evals.map(ev=>[ev.generalData?.fecha||'',ev.generalData?.agente||'',ev.generalData?.evaluador||'',ev.generalData?.reporte||'',ev.generalData?.duracion||'',ev.generalData?.tipo||'',ev.generalData?.resultado||'',wl(ev.waitTime),...SECTIONS.map(s=>ev.sectionScores?.[s.id]!=null?Math.round(ev.sectionScores[s.id])+'%':''),ev.totalScore!=null?Math.round(ev.totalScore)+'%':'',ST(ev.totalScore)].map(v=>`"${String(v).replace(/"/g,'""')}"`).join(','));
+  const csv=[hdrs.join(','),...rows].join('\n');
+  const a=Object.assign(document.createElement('a'),{href:URL.createObjectURL(new Blob(['\uFEFF'+csv],{type:'text/csv;charset=utf-8;'})),download:'evaluaciones_service_desk.csv'});
+  a.click();URL.revokeObjectURL(a.href);
+}
+
+// ── NAVEGACIÓN ────────────────────────────────────────────────────────────────
+function navTo(v){
+  currentView=v;
+  document.getElementById('tab-form').classList.toggle('active',v==='form');
+  document.getElementById('tab-database').classList.toggle('active',v==='database');
+  if(v==='form')buildForm();else{loadEvals();buildDatabase();}
+}
+
+// ── INIT ──────────────────────────────────────────────────────────────────────
+loadEvals();buildForm();
+</script>
+</body>
+</html>
